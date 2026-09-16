@@ -1,0 +1,458 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hand Tracking</title>
+<style>
+  :root {
+    --bg: #05060a;
+    --ink: #e9edf5;
+    --dim: #8c95a8;
+    --line: rgba(255, 255, 255, 0.08);
+    --panel: rgba(10, 12, 20, 0.72);
+    --right: #4df3ff;
+    --left: #ffc861;
+    --ok: #5dff9f;
+    --warn: #ffb84d;
+    --err: #ff6b6b;
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  html, body {
+    margin: 0;
+    height: 100%;
+    overflow: hidden;
+    background: var(--bg);
+    color: var(--ink);
+    font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+
+  /* Webcam, mirrored so it behaves like a mirror, dimmed so the skeleton pops. */
+  #video {
+    position: fixed;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    transform: scaleX(-1);
+    filter: brightness(0.5) saturate(0.75);
+    opacity: 0;
+    transition: opacity 0.6s ease;
+  }
+  #video.on { opacity: 1; }
+  #overlay { position: fixed; inset: 0; width: 100%; height: 100%; }
+
+  /* Top-left readout */
+  .hud {
+    position: fixed;
+    top: 16px;
+    left: 16px;
+    padding: 12px 14px;
+    min-width: 210px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    backdrop-filter: blur(8px);
+    font-variant-numeric: tabular-nums;
+  }
+  .hud h1 { margin: 0 0 8px; font-size: 13px; font-weight: 600; letter-spacing: 0.02em; }
+  .hud h1 span { color: var(--dim); font-weight: 400; }
+  .row { display: flex; justify-content: space-between; gap: 16px; color: var(--dim); }
+  .row b { color: var(--ink); font-weight: 500; }
+  .status { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--dim); flex: none; }
+  .dot.ok { background: var(--ok); box-shadow: 0 0 8px var(--ok); }
+  .dot.warn { background: var(--warn); }
+  .dot.err { background: var(--err); }
+  .legend { display: flex; gap: 14px; margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--line); color: var(--dim); }
+  .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; vertical-align: -1px; }
+
+  /* Centre messages */
+  .center {
+    position: fixed;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    padding: 24px;
+    pointer-events: none;
+  }
+  .card {
+    pointer-events: auto;
+    width: min(420px, 100%);
+    padding: 28px;
+    text-align: center;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    backdrop-filter: blur(10px);
+  }
+  .card h2 { margin: 0 0 8px; font-size: 22px; font-weight: 600; }
+  .card p { margin: 0 0 20px; color: var(--dim); }
+  .card p.error { color: var(--err); }
+  button {
+    font: inherit;
+    font-weight: 600;
+    padding: 12px 22px;
+    border: 0;
+    border-radius: 999px;
+    color: #041014;
+    background: var(--right);
+    box-shadow: 0 0 24px rgba(77, 243, 255, 0.35);
+    cursor: pointer;
+  }
+  button:disabled { opacity: 0.5; cursor: progress; box-shadow: none; }
+  button.small {
+    width: 100%;
+    margin-top: 10px;
+    padding: 7px 10px;
+    font-size: 12px;
+    color: var(--ink);
+    background: rgba(255, 255, 255, 0.08);
+    border: 1px solid var(--line);
+    box-shadow: none;
+  }
+  button.small:hover { background: rgba(255, 255, 255, 0.14); }
+  .nohands {
+    color: rgba(233, 237, 245, 0.7);
+    font-size: 18px;
+    text-shadow: 0 2px 12px #000;
+  }
+</style>
+</head>
+<body>
+
+<video id="video" playsinline muted></video>
+<canvas id="overlay"></canvas>
+
+<div class="hud">
+  <h1>Hand tracking <span>· step 1</span></h1>
+  <div class="status"><span class="dot" id="statusDot"></span><span id="statusText">Not started</span></div>
+  <div class="row">Hands seen <b id="handsCount">0</b></div>
+  <div class="row">Camera speed <b id="cameraFps">–</b></div>
+  <div class="row">Tracking speed <b id="fps">–</b></div>
+  <div class="row">Time per frame <b id="modelMs">–</b></div>
+  <div class="row">Running on <b id="engine">–</b></div>
+  <button class="small" id="switchBtn" hidden>Switch engine</button>
+  <div class="legend">
+    <span><i style="background: var(--right)"></i>Right</span>
+    <span><i style="background: var(--left)"></i>Left</span>
+  </div>
+</div>
+
+<div class="center" id="startScreen">
+  <div class="card">
+    <h2>Hand tracking</h2>
+    <p id="startText">Turns on your webcam and draws the 21 tracking points on each hand. Nothing is recorded or sent anywhere. It all runs on this laptop.</p>
+    <button id="startBtn">Start camera</button>
+  </div>
+</div>
+
+<div class="center" id="noHands" hidden>
+  <div class="nohands">Hold your hand up to the camera ✋</div>
+</div>
+
+<script type="module">
+import {
+  FilesetResolver,
+  HandLandmarker,
+} from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.0.1/vision_bundle.mjs";
+
+const WASM_URL = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.0.1/wasm";
+const MODEL_URL =
+  "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task";
+
+const FINGERTIPS = new Set([4, 8, 12, 16, 20]);
+const COLORS = { Right: "#4df3ff", Left: "#ffc861" };
+const ENGINE_NAMES = { GPU: "Graphics card", CPU: "Processor" };
+const hasFrameCallback = "requestVideoFrameCallback" in HTMLVideoElement.prototype;
+
+const $ = (id) => document.getElementById(id);
+const video = $("video");
+const canvas = $("overlay");
+const ctx = canvas.getContext("2d");
+const startBtn = $("startBtn");
+
+let landmarker = null;
+let fileset = null;
+let delegate = null;
+let running = false;
+let switching = false;
+let lastVideoTime = -1;
+let detections = 0;
+let cameraFrames = 0;
+let countingFrames = false;
+let modelTotalMs = 0;
+let lastFpsUpdate = performance.now();
+
+// ---------- UI helpers ----------
+
+function setStatus(text, kind = "") {
+  $("statusText").textContent = text;
+  $("statusDot").className = "dot " + kind;
+}
+
+function showStartError(message) {
+  $("startScreen").hidden = false;
+  $("noHands").hidden = true;
+  const p = $("startText");
+  p.textContent = message;
+  p.className = "error";
+  startBtn.disabled = false;
+  startBtn.textContent = "Try again";
+  setStatus("Stopped", "err");
+}
+
+function resizeCanvas() {
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = Math.round(innerWidth * dpr);
+  canvas.height = Math.round(innerHeight * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+addEventListener("resize", resizeCanvas);
+resizeCanvas();
+
+// ---------- Setup ----------
+
+async function createLandmarker(wanted) {
+  fileset ??= await FilesetResolver.forVisionTasks(WASM_URL);
+  const lm = await HandLandmarker.createFromOptions(fileset, {
+    baseOptions: { modelAssetPath: MODEL_URL, delegate: wanted },
+    runningMode: "VIDEO",
+    numHands: 2,
+  });
+  delegate = wanted;
+  showEngine();
+  return lm;
+}
+
+async function loadLandmarker() {
+  try {
+    return await createLandmarker("GPU");
+  } catch (gpuError) {
+    console.warn("GPU not available, falling back to CPU:", gpuError);
+    return await createLandmarker("CPU");
+  }
+}
+
+function showEngine() {
+  $("engine").textContent = ENGINE_NAMES[delegate];
+  $("switchBtn").textContent = delegate === "GPU" ? "Switch to processor" : "Switch to graphics card";
+}
+
+// Lets us compare both engines on this laptop: older graphics chips can be
+// slower than the processor for this model.
+$("switchBtn").addEventListener("click", async () => {
+  const btn = $("switchBtn");
+  const target = delegate === "GPU" ? "CPU" : "GPU";
+  const old = landmarker;
+  btn.disabled = true;
+  btn.textContent = "Switching…";
+  switching = true;
+  try {
+    landmarker = await createLandmarker(target);
+    old.close();
+  } catch (err) {
+    console.error(err);
+    landmarker = old;
+    showEngine();
+    setStatus(`${ENGINE_NAMES[target]} isn't available here`, "warn");
+    setTimeout(() => running && setStatus("Tracking", "ok"), 3000);
+  }
+  switching = false;
+  btn.disabled = false;
+});
+
+function countCameraFrame() {
+  cameraFrames++;
+  video.requestVideoFrameCallback(countCameraFrame);
+}
+
+async function openCamera() {
+  const stream = await navigator.mediaDevices.getUserMedia({
+    video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: "user" },
+    audio: false,
+  });
+  video.srcObject = stream;
+  await video.play();
+  if (hasFrameCallback && !countingFrames) {
+    countingFrames = true;
+    video.requestVideoFrameCallback(countCameraFrame);
+  }
+  stream.getVideoTracks()[0].addEventListener("ended", () => {
+    running = false;
+    video.classList.remove("on");
+    ctx.clearRect(0, 0, innerWidth, innerHeight);
+    showStartError("The camera disconnected. Plug it back in and try again.");
+  });
+}
+
+function cameraErrorMessage(err) {
+  switch (err && err.name) {
+    case "NotAllowedError":
+      return "Camera access was blocked. Click the camera icon in the address bar, choose Allow, then try again.";
+    case "NotFoundError":
+    case "OverconstrainedError":
+      return "No camera was found. Plug in your webcam and try again.";
+    case "NotReadableError":
+      return "Your camera is busy. Another app (Zoom, Teams, the Camera app, OBS) is probably using it. Close that app and try again.";
+    default:
+      return "The camera couldn't start: " + (err && err.message ? err.message : err);
+  }
+}
+
+startBtn.addEventListener("click", async () => {
+  startBtn.disabled = true;
+  startBtn.textContent = "Starting…";
+  $("startText").className = "";
+  $("startText").textContent = "Loading the hand-tracking model and asking for your camera…";
+  setStatus("Loading…", "warn");
+
+  if (!navigator.mediaDevices?.getUserMedia) {
+    showStartError("This browser can't use the camera here. Open this file in Chrome or Edge.");
+    return;
+  }
+
+  const modelPromise = landmarker ? Promise.resolve(landmarker) : loadLandmarker();
+  const cameraPromise = video.srcObject?.active ? Promise.resolve() : openCamera();
+
+  const [modelResult, cameraResult] = await Promise.allSettled([modelPromise, cameraPromise]);
+
+  if (cameraResult.status === "rejected") {
+    console.error(cameraResult.reason);
+    showStartError(cameraErrorMessage(cameraResult.reason));
+    if (modelResult.status === "fulfilled") landmarker = modelResult.value;
+    return;
+  }
+  if (modelResult.status === "rejected") {
+    console.error(modelResult.reason);
+    showStartError("Couldn't load the hand-tracking model. Check your internet connection and try again.");
+    return;
+  }
+
+  landmarker = modelResult.value;
+  $("startScreen").hidden = true;
+  $("switchBtn").hidden = false;
+  video.classList.add("on");
+  setStatus("Tracking", "ok");
+  detections = 0;
+  cameraFrames = 0;
+  modelTotalMs = 0;
+  lastFpsUpdate = performance.now();
+  running = true;
+  requestAnimationFrame(loop);
+});
+
+// ---------- Main loop ----------
+
+function loop() {
+  if (!running) return;
+
+  // Only run the model when the camera has produced a new frame.
+  if (!switching && video.readyState >= 2 && video.currentTime !== lastVideoTime) {
+    lastVideoTime = video.currentTime;
+    const started = performance.now();
+    const result = landmarker.detectForVideo(video, started);
+    modelTotalMs += performance.now() - started;
+    detections++;
+    draw(result);
+  }
+
+  const now = performance.now();
+  if (now - lastFpsUpdate >= 500) {
+    const seconds = (now - lastFpsUpdate) / 1000;
+    $("fps").textContent = Math.round(detections / seconds) + " fps";
+    if (hasFrameCallback) $("cameraFps").textContent = Math.round(cameraFrames / seconds) + " fps";
+    $("modelMs").textContent = detections ? Math.round(modelTotalMs / detections) + " ms" : "–";
+    detections = 0;
+    cameraFrames = 0;
+    modelTotalMs = 0;
+    lastFpsUpdate = now;
+  }
+
+  requestAnimationFrame(loop);
+}
+
+// The video is shown with object-fit: cover and mirrored, so a point the model
+// gives us (0–1 across the camera image) needs the same crop and flip applied.
+function toScreen(point) {
+  const vw = video.videoWidth;
+  const vh = video.videoHeight;
+  const scale = Math.max(innerWidth / vw, innerHeight / vh);
+  const w = vw * scale;
+  const h = vh * scale;
+  return {
+    x: (innerWidth - w) / 2 + (1 - point.x) * w,
+    y: (innerHeight - h) / 2 + point.y * h,
+  };
+}
+
+function draw(result) {
+  ctx.clearRect(0, 0, innerWidth, innerHeight);
+
+  const hands = result.landmarks;
+  $("handsCount").textContent = hands.length;
+  $("noHands").hidden = hands.length > 0;
+
+  hands.forEach((points, i) => {
+    const category = result.handedness[i]?.[0];
+    // Checked on the real webcam: with un-mirrored camera frames the model's
+    // label already matches the person's actual hand, so no swap is needed.
+    const side = category?.categoryName === "Left" ? "Left" : "Right";
+    const color = COLORS[side];
+    const screen = points.map(toScreen);
+
+    // Hand size on screen (wrist to middle knuckle) keeps lines and dots in
+    // proportion whether the hand is close to the camera or far away.
+    const size = Math.hypot(screen[9].x - screen[0].x, screen[9].y - screen[0].y);
+    const lineWidth = Math.max(2, size * 0.045);
+
+    ctx.save();
+    ctx.globalCompositeOperation = "lighter";
+    ctx.shadowColor = color;
+    ctx.shadowBlur = 14;
+
+    // Bones
+    ctx.strokeStyle = color;
+    ctx.lineWidth = lineWidth;
+    ctx.lineCap = "round";
+    ctx.beginPath();
+    for (const { start, end } of HandLandmarker.HAND_CONNECTIONS) {
+      ctx.moveTo(screen[start].x, screen[start].y);
+      ctx.lineTo(screen[end].x, screen[end].y);
+    }
+    ctx.stroke();
+
+    // Joints: fingertips larger with a white core
+    screen.forEach((p, idx) => {
+      const tip = FINGERTIPS.has(idx);
+      const r = lineWidth * (tip ? 1.6 : 1.05);
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+      ctx.fill();
+      if (tip) {
+        ctx.fillStyle = "#ffffff";
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, r * 0.45, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    });
+    ctx.restore();
+
+    // Label under the wrist
+    const wrist = screen[0];
+    const confidence = category ? Math.round(category.score * 100) : 0;
+    ctx.save();
+    ctx.font = "600 13px system-ui, -apple-system, 'Segoe UI', sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillStyle = color;
+    ctx.shadowColor = "rgba(0,0,0,0.9)";
+    ctx.shadowBlur = 6;
+    ctx.fillText(`${side} hand · ${confidence}%`, wrist.x, wrist.y + lineWidth * 2 + 18);
+    ctx.restore();
+  });
+}
+</script>
+</body>
+</html>
